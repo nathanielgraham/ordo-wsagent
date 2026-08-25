@@ -68,13 +68,12 @@ AGENT_BOOTSTRAP = {
             "name": "my-job",
             "parent_id": "<cluster_id from create_cluster or find_cluster>",
             "server_id": 4,
-            "script_b64": "IyEvYmluL3NoCmVjaG8gaGVsbG8Kc2xlZXAgNQplY2hvIGRvbmUK",
+            "script": "#!/bin/sh\necho hello\nsleep 5\necho done\n",
             "_note": (
-                "script_b64 is required today. Plain 'script' (server base64s it) "
-                "and alternate parent keys (cluster_id / name) are planned. "
-                "Replace parent_id with a real cluster id before sending."
+                "Prefer plain 'script' (JSON-safe). 'script_b64' is also accepted "
+                "for compatibility. Replace parent_id with a real cluster id "
+                "and server_id with a real server id before sending."
             ),
-            "_script_plain": "#!/bin/sh\necho hello\nsleep 5\necho done\n",
         },
     },
     "doc_sections": [
@@ -112,6 +111,12 @@ AGENT_BOOTSTRAP = {
         "Full docs: https://ordoscheduler.com (or public/docs/ on GitHub).",
         "Clear-semantics: omit a field = leave unchanged; "
         "send null / \"\" / [] to clear.",
+        (
+            "Start-and-wait pattern: send start_cluster, keep stdin open, "
+            "watch for clusters_changed / jobs_changed broadcasts until the "
+            "target cluster reaches jobstate complete (or failed/killed). "
+            "Then send quit."
+        ),
     ],
 }
 
