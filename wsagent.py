@@ -4,7 +4,7 @@ wsagent.py – minimal Ordo WebSocket client for agents
 
     pip install websocket-client
 
-    ORDO_TOKEN=... ./wsagent.py [--timeout 600]
+    ORDO_TOKEN=... python3 wsagent.py [--timeout 600]
 
     Send JSON commands on stdin, one per line.
     Read NDJSON on stdout.  Only lines with type=message contain
@@ -46,12 +46,12 @@ AGENT_BOOTSTRAP = {
         "(command replies and live broadcasts)."
     ),
     "first_step": (
-        "Call get_documentation (section 'overview' or 'quickstart') "
-        "before doing real work in a new session."
+        "Call get_documentation (section 'overview' or 'quickstart', "
+        "format 'markdown') before doing real work in a new session."
     ),
     "useful_commands": [
-        {"command": "get_documentation", "section": "overview"},
-        {"command": "get_documentation", "section": "quickstart"},
+        {"command": "get_documentation", "section": "overview", "format": "markdown"},
+        {"command": "get_documentation", "section": "quickstart", "format": "markdown"},
         {"command": "read_org"},
         {"command": "find_cluster", "name": "/root"},
         {"command": "find_cluster", "name": "/root/ops"},
@@ -77,6 +77,7 @@ AGENT_BOOTSTRAP = {
     ),
     "notes": [
         "This is a long-lived WebSocket. Broadcasts arrive unsolicited.",
+        "Keep stdin open until you are finished; only send quit or close when done.",
         "MCP tools remain available at https://ordoscheduler.com/mcp "
         "for request/response use.",
         "Full docs: https://ordoscheduler.com (or public/docs/ on GitHub).",
@@ -102,7 +103,7 @@ LOGIN_FAILED_BLURB = {
     "next_steps_after_valid_token": [
         "On successful login this client emits an agent_bootstrap message.",
         "First useful call is usually: "
-        '{"command":"get_documentation","section":"overview"}',
+        '{"command":"get_documentation","section":"overview","format":"markdown"}',
         "Then explore with read_org / find_cluster.",
     ],
     "links": {
@@ -227,7 +228,7 @@ def main() -> None:
 
     def _shutdown(reason: str) -> None:
         # Wait briefly for in-flight command_reply so one-shot
-        #   printf 'cmd\nquit\n' | wsagent.py
+        #   printf 'cmd\nquit\n' | python3 wsagent.py
         # still receives the reply.
         if not pending_event.wait(timeout=3.0):
             emit(
