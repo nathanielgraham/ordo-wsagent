@@ -10,8 +10,8 @@ wsagent.py – minimal Ordo WebSocket client for agents
     Read NDJSON on stdout.  Only lines with type=message contain
     server data (command replies + live broadcasts).
 
-    When finished, send quit/exit, close stdin, or kill the process.
-    --timeout is only a safety net.
+    When finished, send quit (bare word or {"command":"quit"}),
+    close stdin, or kill the process.  --timeout is only a safety net.
 """
 
 from __future__ import annotations
@@ -72,12 +72,14 @@ AGENT_BOOTSTRAP = {
         "1. send a command  "
         "2. wait for the matching command_reply "
         "(and any jobs_changed / clusters_changed broadcasts)  "
-        "3. when you have what you need, send quit (or close stdin / "
-        "kill the process) to disconnect"
+        "3. when you have what you need, disconnect with quit "
+        "(bare word or {\"command\":\"quit\"}) or by closing stdin / killing the process"
     ),
     "notes": [
         "This is a long-lived WebSocket. Broadcasts arrive unsolicited.",
-        "Keep stdin open until you are finished; only send quit or close when done.",
+        "Disconnect is client-side only: send the bare word 'quit' (or 'exit'), "
+        "or the JSON object {\"command\":\"quit\"}. Neither is forwarded to the server.",
+        "Keep stdin open until you are finished; closing stdin also triggers shutdown.",
         "MCP tools remain available at https://ordoscheduler.com/mcp "
         "for request/response use.",
         "Full docs: https://ordoscheduler.com (or public/docs/ on GitHub).",
@@ -268,15 +270,26 @@ def main() -> None:
                 line = line.strip()
                 if not line:
                     continue
-                # quit/exit → drain in-flight replies, then shut down
+
+                # Client-side disconnect signals (never forwarded to the server)
                 if line.lower() in {"quit", "exit"}:
                     _shutdown("quit")
                     return
+
                 try:
                     cmd = json.loads(line)
                 except json.JSONDecodeError:
                     emit("error", {"message": "invalid JSON on stdin"}, start)
                     continue
+
+                # Also accept {"command":"quit"} / {"command":"exit"}
+                if (
+                    isinstance(cmd, dict)
+                    and str(cmd.get("command", "")).lower() in {"quit", "exit"}
+                ):
+                    _shutdown("quit")
+                    return
+
                 emit("info", {"event": "sending", "command": cmd}, start)
                 _pending_inc()
                 if ws_app:
