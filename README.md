@@ -18,8 +18,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 export ORDO_TOKEN="your_token_here"
-./wsagent.py --timeout 120
+python3 wsagent.py --timeout 120
 ```
+
+Prefer `python3 wsagent.py` over `./wsagent.py` for portability (some environments reject the shebang).
 
 You are now connected. Send JSON commands on stdin (one per line).  
 When finished, send `quit` (or close stdin / kill the process).  
@@ -28,7 +30,7 @@ When finished, send `quit` (or close stdin / kill the process).
 ### Minimal one-shot example
 
 ```bash
-printf '{"command":"read_org"}\nquit\n' | ORDO_TOKEN=... ./wsagent.py --timeout 10
+printf '{"command":"read_org"}\nquit\n' | ORDO_TOKEN=... python3 wsagent.py --timeout 10
 ```
 
 ## 2. Output format (NDJSON)
@@ -127,7 +129,7 @@ The agent may also disconnect by closing stdin or killing the process. `quit` is
 
 | Goal | Command |
 |------|---------|
-| Docs (start here) | `{"command":"get_documentation","section":"overview"}` |
+| Docs (start here) | `{"command":"get_documentation","section":"overview","format":"markdown"}` |
 | See org info | `{"command":"read_org"}` |
 | Discover structure | `{"command":"find_cluster","name":"/root"}` or `"/root/ops"` |
 | Inspect one cluster | `{"command":"read_cluster","id":24}` |
@@ -152,14 +154,16 @@ A broadcast is just another `type: "message"` object. Look at the `command_reply
 
 ## 7. Recommended agent workflow
 
-1. Start `wsagent.py` with a generous timeout (120–600 s) as a safety net
+1. Start `python3 wsagent.py` with a generous timeout (120–600 s) as a safety net
 2. Wait for `login_user` success + the `agent_bootstrap` info event
-3. Call `get_documentation` (overview / quickstart) if this is a new session
+3. Call `get_documentation` (overview / quickstart, format markdown) if this is a new session
 4. Send `find_cluster` / `read_cluster` to understand current state
 5. Send `start_cluster` or `start_job`
 6. Keep reading the stream until you see the relevant completion broadcast
 7. (optional) send `read_log`
 8. Send `quit` (or close stdin / kill the process) to disconnect
+
+**Note:** Keep stdin open until you are finished. Closing stdin immediately triggers shutdown (correct for one-shots, sharp for long-lived runners).
 
 ## 8. Clear-semantics reminder (important)
 
