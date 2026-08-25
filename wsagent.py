@@ -64,7 +64,7 @@ AGENT_BOOTSTRAP = {
         "calendars-and-crons",
         "advanced-topics",
         "connecting-to-ai",
-        "rest-api",
+        "api",
         "cli",
         "faq",
     ],
