@@ -55,7 +55,28 @@ AGENT_BOOTSTRAP = {
         {"command": "read_org"},
         {"command": "find_cluster", "name": "/root"},
         {"command": "find_cluster", "name": "/root/ops"},
+        {"command": "create_cluster", "name": "example-cluster", "parent_id": 1},
     ],
+    "minimal_create_examples": {
+        "create_cluster": {
+            "command": "create_cluster",
+            "name": "my-cluster",
+            "parent_id": 1,
+        },
+        "create_job": {
+            "command": "create_job",
+            "name": "my-job",
+            "parent_id": "<cluster_id from create_cluster or find_cluster>",
+            "server_id": 4,
+            "script_b64": "IyEvYmluL3NoCmVjaG8gaGVsbG8Kc2xlZXAgNQplY2hvIGRvbmUK",
+            "_note": (
+                "script_b64 is required today. Plain 'script' (server base64s it) "
+                "and alternate parent keys (cluster_id / name) are planned. "
+                "Replace parent_id with a real cluster id before sending."
+            ),
+            "_script_plain": "#!/bin/sh\necho hello\nsleep 5\necho done\n",
+        },
+    },
     "doc_sections": [
         "overview",
         "quickstart",
@@ -80,6 +101,12 @@ AGENT_BOOTSTRAP = {
         "Disconnect is client-side only: send the bare word 'quit' (or 'exit'), "
         "or the JSON object {\"command\":\"quit\"}. Neither is forwarded to the server.",
         "Keep stdin open until you are finished; closing stdin also triggers shutdown.",
+        (
+            "If the WebSocket closes after you started work (e.g. self-deploy restart, "
+            "network blip, 502), treat it as connection lost — not job failure. "
+            "Start a new client, re-login, then read_cluster / find_cluster to learn "
+            "the actual outcome before deciding what to do next."
+        ),
         "MCP tools remain available at https://ordoscheduler.com/mcp "
         "for request/response use.",
         "Full docs: https://ordoscheduler.com (or public/docs/ on GitHub).",
@@ -230,7 +257,7 @@ def main() -> None:
 
     def _shutdown(reason: str) -> None:
         # Wait briefly for in-flight command_reply so one-shot
-        #   printf 'cmd\nquit\n' | python3 wsagent.py
+        #   printf 'cmd\nquit\n' | wsagent.py
         # still receives the reply.
         if not pending_event.wait(timeout=3.0):
             emit(
