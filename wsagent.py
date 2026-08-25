@@ -165,7 +165,24 @@ def main() -> None:
     done = threading.Event()
     logged_in = threading.Event()
     login_failed = threading.Event()
+    # Track in-flight commands so quit/EOF does not drop replies (one-shot safe)
+    pending = [0]
+    pending_lock = threading.Lock()
+    pending_event = threading.Event()
+    pending_event.set()  # no pending initially
     ws_app: Optional[websocket.WebSocketApp] = None
+
+    def _pending_inc() -> None:
+        with pending_lock:
+            pending[0] += 1
+            pending_event.clear()
+
+    def _pending_dec() -> None:
+        with pending_lock:
+            if pending[0] > 0:
+                pending[0] -= 1
+            if pending[0] == 0:
+                pending_event.set()
 
     def on_open(ws: websocket.WebSocketApp) -> None:
         emit("info", {"event": "connected", "url": args.url}, start)
@@ -180,7 +197,11 @@ def main() -> None:
 
         emit("message", data, start)
 
-        if data.get("command_reply") != "login_user":
+        reply = data.get("command_reply")
+        if reply and reply != "login_user":
+            _pending_dec()
+
+        if reply != "login_user":
             return
         if logged_in.is_set() or login_failed.is_set():
             return
@@ -204,6 +225,36 @@ def main() -> None:
         emit("info", {"event": "closed", "code": code, "msg": msg}, start)
         done.set()
 
+    def _shutdown(reason: str) -> None:
+        # Wait briefly for in-flight command_reply so one-shot
+        #   printf 'cmd\nquit\n' | wsagent.py
+        # still receives the reply.
+        if not pending_event.wait(timeout=3.0):
+            emit(
+                "info",
+                {
+                    "event": "shutdown_grace_timeout",
+                    "note": "Proceeding with shutdown; some replies may be missing.",
+                    "pending": pending[0],
+                },
+                start,
+            )
+        emit(
+            "info",
+            {
+                "event": "shutdown",
+                "reason": reason,
+                "note": "Client shutting down.",
+            },
+            start,
+        )
+        done.set()
+        try:
+            if ws_app:
+                ws_app.close()
+        except Exception:
+            pass
+
     def stdin_reader() -> None:
         if not logged_in.wait(timeout=args.timeout):
             if not login_failed.is_set():
@@ -216,23 +267,9 @@ def main() -> None:
                 line = line.strip()
                 if not line:
                     continue
-                # quit/exit → clean shutdown (useful for agents and one-shot pipes)
+                # quit/exit → drain in-flight replies, then shut down
                 if line.lower() in {"quit", "exit"}:
-                    emit(
-                        "info",
-                        {
-                            "event": "shutdown",
-                            "reason": "quit",
-                            "note": "Client shutting down on quit/exit.",
-                        },
-                        start,
-                    )
-                    done.set()
-                    try:
-                        if ws_app:
-                            ws_app.close()
-                    except Exception:
-                        pass
+                    _shutdown("quit")
                     return
                 try:
                     cmd = json.loads(line)
@@ -240,26 +277,13 @@ def main() -> None:
                     emit("error", {"message": "invalid JSON on stdin"}, start)
                     continue
                 emit("info", {"event": "sending", "command": cmd}, start)
+                _pending_inc()
                 if ws_app:
                     ws_app.send(json.dumps(cmd))
         except Exception as e:
             emit("error", {"message": f"stdin error: {e}"}, start)
-        # EOF on stdin → also shut down cleanly
-        emit(
-            "info",
-            {
-                "event": "shutdown",
-                "reason": "eof",
-                "note": "stdin closed; client shutting down.",
-            },
-            start,
-        )
-        done.set()
-        try:
-            if ws_app:
-                ws_app.close()
-        except Exception:
-            pass
+        # EOF on stdin → drain in-flight replies, then shut down
+        _shutdown("eof")
 
     ws_app = websocket.WebSocketApp(
         args.url,
