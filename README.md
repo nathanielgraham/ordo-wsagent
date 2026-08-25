@@ -10,21 +10,25 @@ MCP tools are still available, but they are request/response only. When you need
 
 ## 1. Quick start (copy-paste)
 
-    git clone https://github.com/nathanielgraham/ordo-wsagent.git
-    cd ordo-wsagent
-    python3 -m venv .venv
-    source .venv/bin/activate
-    pip install -r requirements.txt
+```bash
+git clone https://github.com/nathanielgraham/ordo-wsagent.git
+cd ordo-wsagent
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-    export ORDO_TOKEN="your_token_here"
-    ./wsagent.py --timeout 120
+export ORDO_TOKEN="your_token_here"
+./wsagent.py --timeout 120
+```
 
 You are now connected. Send JSON commands on stdin (one per line).  
-Type `quit` or close stdin when you have no more commands. The process stays alive until the timeout so you can receive broadcasts.
+When finished, just exit or close stdin. The process also exits on `--timeout` (safety net) or when the server closes the socket.
 
 ### Minimal one-shot example
 
-    printf '{"command":"read_org"}\nquit\n' | ORDO_TOKEN=... ./wsagent.py --timeout 10
+```bash
+printf '{"command":"read_org"}\n' | ORDO_TOKEN=... ./wsagent.py --timeout 10
+```
 
 ## 2. Output format (NDJSON)
 
@@ -32,25 +36,41 @@ Every line is a JSON object:
 
 | `type`    | Meaning |
 |-----------|---------|
-| `info`    | Client events (`connected`, `sending`, `timeout`, `stdin_closed`…) |
+| `info`    | Client events (`connected`, `agent_bootstrap`, `sending`, `timeout`, …) |
 | `message` | Everything from the Ordo server (command replies **and** broadcasts) |
-| `error`   | Client-side problems |
+| `error`   | Client-side problems or login failure |
 | `summary` | Final line when the process exits |
 
 **Always look at `type == "message"`.** That is the data you care about.
+
+### Bootstrap messages
+
+After a successful login the client emits an `info` event with `event: "agent_bootstrap"`. It contains:
+
+- protocol reminder
+- first recommended call (`get_documentation`)
+- useful starter commands
+- doc section list
+- the core agent loop
+
+If login fails (or no token was supplied) the client emits a structured error with instructions on how to obtain a token and get started.
 
 ## 3. Login (automatic)
 
 On connect the client automatically sends:
 
-    {"command":"login_user","token":"..."}
+```json
+{"command":"login_user","token":"..."}
+```
 
 You will see a message with:
 
-    "command_reply": "login_user",
-    "success": 1
+```json
+"command_reply": "login_user",
+"success": 1
+```
 
-Only after this succeeds does the client start reading your commands from stdin.
+Only after this succeeds does the client start reading your commands from stdin. Immediately after login success it also emits the `agent_bootstrap` info event described above.
 
 ## 4. Core agent pattern: start something and wait for it to finish
 
@@ -59,45 +79,54 @@ This is the most important pattern.
 1. Send a start command.
 2. You immediately receive a `command_reply` saying the start was accepted.
 3. Later you receive one or more **broadcasts** (`jobs_changed` / `clusters_changed`) when the real state changes.
-4. When you see the job or cluster reach a terminal state (`complete`, `failed`, etc.), you are done.
+4. When you see the job or cluster reach a terminal state (`complete`, `failed`, etc.), you are done — **just exit**.
 
 ### Example – start a cluster and watch
 
-    {"command":"start_cluster","id":17}
+```json
+{"command":"start_cluster","id":17}
+```
 
 Immediate reply (example):
 
-    {
-      "command_reply": "start_cluster",
-      "success": 1,
-      "message": "cluster started"
-    }
+```json
+{
+  "command_reply": "start_cluster",
+  "success": 1,
+  "message": "cluster started"
+}
+```
 
 Later you will see broadcasts that look roughly like:
 
+```json
+{
+  "command_reply": "jobs_changed",
+  "jobs": [
     {
-      "command_reply": "jobs_changed",
-      "jobs": [
-        {
-          "id": 10,
-          "name": "verify",
-          "jobstate": "complete",
-          "state_id": 5,
-          "exit_code": 0
-        }
-      ]
+      "id": 10,
+      "name": "verify",
+      "jobstate": "complete",
+      "state_id": 5,
+      "exit_code": 0
     }
+  ]
+}
+```
 
 **Agent logic:**
 
 - Keep reading the NDJSON stream.
 - When you see a broadcast where the job/cluster you care about has `jobstate` / state in `["complete","failed","error"]` (or `state_id` 5 = complete, etc.), treat the work as finished.
-- Then you can issue a `read_log` or move on.
+- Then exit (or issue a `read_log` first if you need logs).
+
+The agent is free to disconnect at any time. There is no special “quit” command required.
 
 ## 5. Most useful commands for agents
 
 | Goal | Command |
 |------|---------|
+| Docs (start here) | `{"command":"get_documentation","section":"overview"}` |
 | See org info | `{"command":"read_org"}` |
 | Discover structure | `{"command":"find_cluster","name":"/root"}` or `"/root/ops"` |
 | Inspect one cluster | `{"command":"read_cluster","id":24}` |
@@ -122,13 +151,14 @@ A broadcast is just another `type: "message"` object. Look at the `command_reply
 
 ## 7. Recommended agent workflow
 
-1. Start wsagent.py with a generous timeout (120–600 s)
-2. Wait for login_user success
-3. send find_cluster / read_cluster to understand current state
-4. send start_cluster or start_job
-5. keep reading the stream until you see the relevant completion broadcast
-6. (optional) send read_log
-7. send quit or close stdin
+1. Start `wsagent.py` with a generous timeout (120–600 s) as a safety net
+2. Wait for `login_user` success + the `agent_bootstrap` info event
+3. Call `get_documentation` (overview / quickstart) if this is a new session
+4. Send `find_cluster` / `read_cluster` to understand current state
+5. Send `start_cluster` or `start_job`
+6. Keep reading the stream until you see the relevant completion broadcast
+7. (optional) send `read_log`
+8. Exit — the agent controls when to disconnect
 
 ## 8. Clear-semantics reminder (important)
 
@@ -143,3 +173,9 @@ When updating jobs or clusters:
 - Treat `ORDO_TOKEN` like a password.
 - Prefer short-lived or scoped tokens when possible.
 - Never commit tokens into the repo.
+
+Get a token: sign up / log in at https://ordoscheduler.com → Settings → copy API token.
+
+## License
+
+MIT
