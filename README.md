@@ -24,7 +24,7 @@ python3 wsagent.py --timeout 120
 Prefer `python3 wsagent.py` over `./wsagent.py` for portability (some environments reject the shebang).
 
 You are now connected. Send JSON commands on stdin (one per line).  
-When finished, send `quit` (or close stdin / kill the process).  
+When finished, disconnect with `quit` (bare word **or** `{"command":"quit"}`), by closing stdin, or by killing the process.  
 `--timeout` is only a safety net; the server closing the socket also ends the client.
 
 ### Minimal one-shot example
@@ -32,6 +32,8 @@ When finished, send `quit` (or close stdin / kill the process).
 ```bash
 printf '{"command":"read_org"}\nquit\n' | ORDO_TOKEN=... python3 wsagent.py --timeout 10
 ```
+
+(The JSON form also works: `printf '{"command":"read_org"}\n{"command":"quit"}\n' | ...`)
 
 ## 2. Output format (NDJSON)
 
@@ -82,7 +84,7 @@ This is the most important pattern.
 1. Send a start command.
 2. You immediately receive a `command_reply` saying the start was accepted.
 3. Later you receive one or more **broadcasts** (`jobs_changed` / `clusters_changed`) when the real state changes.
-4. When you see the job or cluster reach a terminal state (`complete`, `failed`, etc.), you are done — send **`quit`** (or close stdin / kill the process).
+4. When you see the job or cluster reach a terminal state (`complete`, `failed`, etc.), you are done — disconnect.
 
 ### Example – start a cluster and watch
 
@@ -121,9 +123,20 @@ Later you will see broadcasts that look roughly like:
 
 - Keep reading the NDJSON stream.
 - When you see a broadcast where the job/cluster you care about has `jobstate` / state in `["complete","failed","error"]` (or `state_id` 5 = complete, etc.), treat the work as finished.
-- Then send `quit` (or issue a `read_log` first if you need logs).
+- Then disconnect (or issue a `read_log` first if you need logs).
 
-The agent may also disconnect by closing stdin or killing the process. `quit` is the clean in-band way to shut down.
+### How to disconnect
+
+Disconnect is **client-side only** — nothing is sent to the Ordo server.
+
+Any of these work:
+
+- bare word: `quit` or `exit`
+- JSON: `{"command":"quit"}` or `{"command":"exit"}`
+- close stdin (EOF)
+- kill the process
+
+`quit` is the clean in-band way for long-lived agent sessions.
 
 ## 5. Most useful commands for agents
 
@@ -161,7 +174,7 @@ A broadcast is just another `type: "message"` object. Look at the `command_reply
 5. Send `start_cluster` or `start_job`
 6. Keep reading the stream until you see the relevant completion broadcast
 7. (optional) send `read_log`
-8. Send `quit` (or close stdin / kill the process) to disconnect
+8. Disconnect with `quit` (bare word or `{"command":"quit"}`) or by closing stdin
 
 **Note:** Keep stdin open until you are finished. Closing stdin immediately triggers shutdown (correct for one-shots, sharp for long-lived runners).
 
