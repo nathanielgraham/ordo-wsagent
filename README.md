@@ -22,12 +22,13 @@ export ORDO_TOKEN="your_token_here"
 ```
 
 You are now connected. Send JSON commands on stdin (one per line).  
-When finished, just exit or close stdin. The process also exits on `--timeout` (safety net) or when the server closes the socket.
+When finished, send `quit` (or close stdin / kill the process).  
+`--timeout` is only a safety net; the server closing the socket also ends the client.
 
 ### Minimal one-shot example
 
 ```bash
-printf '{"command":"read_org"}\n' | ORDO_TOKEN=... ./wsagent.py --timeout 10
+printf '{"command":"read_org"}\nquit\n' | ORDO_TOKEN=... ./wsagent.py --timeout 10
 ```
 
 ## 2. Output format (NDJSON)
@@ -79,7 +80,7 @@ This is the most important pattern.
 1. Send a start command.
 2. You immediately receive a `command_reply` saying the start was accepted.
 3. Later you receive one or more **broadcasts** (`jobs_changed` / `clusters_changed`) when the real state changes.
-4. When you see the job or cluster reach a terminal state (`complete`, `failed`, etc.), you are done — **just exit**.
+4. When you see the job or cluster reach a terminal state (`complete`, `failed`, etc.), you are done — send **`quit`** (or close stdin / kill the process).
 
 ### Example – start a cluster and watch
 
@@ -118,9 +119,9 @@ Later you will see broadcasts that look roughly like:
 
 - Keep reading the NDJSON stream.
 - When you see a broadcast where the job/cluster you care about has `jobstate` / state in `["complete","failed","error"]` (or `state_id` 5 = complete, etc.), treat the work as finished.
-- Then exit (or issue a `read_log` first if you need logs).
+- Then send `quit` (or issue a `read_log` first if you need logs).
 
-The agent is free to disconnect at any time. There is no special “quit” command required.
+The agent may also disconnect by closing stdin or killing the process. `quit` is the clean in-band way to shut down.
 
 ## 5. Most useful commands for agents
 
@@ -158,7 +159,7 @@ A broadcast is just another `type: "message"` object. Look at the `command_reply
 5. Send `start_cluster` or `start_job`
 6. Keep reading the stream until you see the relevant completion broadcast
 7. (optional) send `read_log`
-8. Exit — the agent controls when to disconnect
+8. Send `quit` (or close stdin / kill the process) to disconnect
 
 ## 8. Clear-semantics reminder (important)
 

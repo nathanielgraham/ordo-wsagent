@@ -10,8 +10,8 @@ wsagent.py – minimal Ordo WebSocket client for agents
     Read NDJSON on stdout.  Only lines with type=message contain
     server data (command replies + live broadcasts).
 
-    When finished, just exit or close stdin.  Lifetime is controlled
-    by the agent process or by --timeout (safety net).
+    When finished, send quit/exit, close stdin, or kill the process.
+    --timeout is only a safety net.
 """
 
 from __future__ import annotations
@@ -72,8 +72,8 @@ AGENT_BOOTSTRAP = {
         "1. send a command  "
         "2. wait for the matching command_reply "
         "(and any jobs_changed / clusters_changed broadcasts)  "
-        "3. when you have what you need, just exit — "
-        "do not rely on a special quit command"
+        "3. when you have what you need, send quit (or close stdin / "
+        "kill the process) to disconnect"
     ),
     "notes": [
         "This is a long-lived WebSocket. Broadcasts arrive unsolicited.",
@@ -216,23 +216,24 @@ def main() -> None:
                 line = line.strip()
                 if not line:
                     continue
-                # Accept quit/exit as "no more commands" for human convenience.
-                # They do NOT force process exit — agent (or timeout) does that.
+                # quit/exit → clean shutdown (useful for agents and one-shot pipes)
                 if line.lower() in {"quit", "exit"}:
                     emit(
                         "info",
                         {
-                            "event": "stdin_closed",
+                            "event": "shutdown",
                             "reason": "quit",
-                            "note": (
-                                "Stopped accepting commands. "
-                                "Process stays alive until timeout or "
-                                "the controlling agent exits."
-                            ),
+                            "note": "Client shutting down on quit/exit.",
                         },
                         start,
                     )
-                    break
+                    done.set()
+                    try:
+                        if ws_app:
+                            ws_app.close()
+                    except Exception:
+                        pass
+                    return
                 try:
                     cmd = json.loads(line)
                 except json.JSONDecodeError:
@@ -243,8 +244,22 @@ def main() -> None:
                     ws_app.send(json.dumps(cmd))
         except Exception as e:
             emit("error", {"message": f"stdin error: {e}"}, start)
-        # EOF or quit → stop accepting commands; socket stays open
-        # until timeout, server close, or the agent kills the process.
+        # EOF on stdin → also shut down cleanly
+        emit(
+            "info",
+            {
+                "event": "shutdown",
+                "reason": "eof",
+                "note": "stdin closed; client shutting down.",
+            },
+            start,
+        )
+        done.set()
+        try:
+            if ws_app:
+                ws_app.close()
+        except Exception:
+            pass
 
     ws_app = websocket.WebSocketApp(
         args.url,
