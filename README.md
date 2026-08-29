@@ -167,6 +167,8 @@ A broadcast is just another `type: "message"` object. Look at the `command_reply
 
 ## 7. Recommended agent workflow
 
+Optional `request_id` on a command is echoed on that `command_reply` only (never on broadcasts). Omit it for today's protocol.
+
 1. Start `python3 wsagent.py` with a generous timeout (120–600 s) as a safety net
 2. Wait for `login_user` success + the `agent_bootstrap` info event
 3. Call `get_documentation` (overview / quickstart, format markdown) if this is a new session
