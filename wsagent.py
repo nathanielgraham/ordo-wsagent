@@ -89,13 +89,14 @@ AGENT_BOOTSTRAP = {
         "faq",
     ],
     "agent_loop": (
-        "1. send a command  "
+        "1. send a command (optional request_id is echoed on that command_reply; omit for today's protocol)  "
         "2. wait for the matching command_reply "
         "(and any jobs_changed / clusters_changed broadcasts)  "
         "3. when you have what you need, disconnect with quit "
         "(bare word or {\"command\":\"quit\"}) or by closing stdin / killing the process"
     ),
     "notes": [
+        "Optional request_id on a command is copied onto that command_reply only. Broadcasts never include it. Omit the field and the reply is unchanged.",
         "This is a long-lived WebSocket. Broadcasts arrive unsolicited.",
         "Disconnect is client-side only: send the bare word 'quit' (or 'exit'), "
         "or the JSON object {\"command\":\"quit\"}. Neither is forwarded to the server.",
