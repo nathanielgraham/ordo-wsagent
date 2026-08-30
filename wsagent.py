@@ -7,12 +7,13 @@ wsagent.py – minimal Ordo WebSocket client for agents
     ORDO_TOKEN=... python3 wsagent.py [--timeout 600]
 
     Send JSON commands on stdin, one per line.
-    Read NDJSON on stdout.  Only lines with type=message contain
-    server data (command replies + live broadcasts).
+    Read NDJSON on stdout.  Server data is line["payload"] when
+    line["type"] == "message" (command replies + live broadcasts).
 
-    Command replies have command_reply. Broadcasts have broadcast
-    plus updates/deletes — they do not have command_reply.
-    Wait for terminal jobstate on broadcast updates, not on command_reply.
+    Command replies have payload.command_reply. Broadcasts have
+    payload.broadcast plus updates/deletes — they do not have
+    command_reply. Wait for terminal jobstate on broadcast updates,
+    not on the start command_reply.
 
     When finished, send quit (bare word or {"command":"quit"}),
     close stdin, or kill the process.  --timeout is only a safety net.
@@ -46,9 +47,11 @@ AGENT_BOOTSTRAP = {
     "protocol": (
         "Send one JSON object per line on stdin. "
         "Read NDJSON on stdout. "
-        "Only lines with type=message contain server data. "
-        "Command replies have command_reply. "
-        "Broadcasts have broadcast plus updates/deletes and do not have command_reply."
+        "Each stdout line is a wrapper: type, ts, elapsed, payload. "
+        "Server data is in payload when type=message. "
+        "payload.command_reply = ack/result of a command you sent. "
+        "payload.broadcast = unsolicited live update with updates/deletes. "
+        "Broadcasts do not have command_reply."
     ),
     "first_step": (
         "Call get_documentation (section 'overview' or 'quickstart', "
@@ -94,22 +97,49 @@ AGENT_BOOTSTRAP = {
         "faq",
     ],
     "agent_loop": (
-        "1. send a command (optional request_id is echoed on that command_reply; omit for today's protocol)  "
-        "2. wait for the matching command_reply if you sent a command  "
-        "3. for start-and-wait, keep reading type=message payloads whose "
-        "broadcast is jobs_changed or clusters_changed and scan updates[]  "
-        "until the target id reaches a terminal jobstate "
-        "(complete, failed, error, killed, or state_id 5)  "
-        "4. then disconnect with quit "
-        "(bare word or {\"command\":\"quit\"}) or by closing stdin / killing the process"
+        "1. send a command on stdin  "
+        "2. if you need the ack, wait for type=message payload.command_reply  "
+        "3. start-and-wait: keep stdin open; completion is payload.broadcast "
+        "(jobs_changed or clusters_changed) whose updates[] contain the "
+        "id you started in a terminal jobstate  "
+        "4. a start command_reply is an ack, not completion  "
+        "5. disconnect with quit (bare word or {\"command\":\"quit\"})"
     ),
+    "wait_for_terminal": {
+        "envelope": "Read stdout JSON. Server fields are under payload when type=message.",
+        "ack_is_not_done": (
+            "payload.command_reply start_cluster/start_job with success=1 means "
+            "accepted. Keep waiting."
+        ),
+        "where": "payload.broadcast in jobs_changed|clusters_changed; scan payload.updates",
+        "job": "After start_job id N, done when jobs_changed updates[] has id=N terminal",
+        "cluster": (
+            "After start_cluster id C, done when clusters_changed updates[] has id=C terminal. "
+            "A child job completing is not the cluster completing."
+        ),
+        "terminal_jobstate": ["complete", "failed", "error", "killed"],
+        "complete_state_id": 5,
+        "this_run": (
+            "Prefer updates[].started >= the started_at from the start ack. "
+            "Reset/start leftover broadcasts are not this run."
+        ),
+        "request_id": (
+            "Optional on commands. Copied onto that command_reply only. "
+            "Never on broadcasts. Do not use it to wait for completion. Omit it."
+        ),
+        "fallback": (
+            "If no matching broadcast after about 20s, send read_cluster or "
+            "read_job and use that jobstate."
+        ),
+        "stdin": "Keep stdin open until quit. Closing stdin shuts the client down.",
+    },
     "notes": [
-        "Optional request_id on a command is copied onto that command_reply only. Broadcasts never include it. Omit the field and the reply is unchanged.",
+        "request_id is optional and only correlates a command to its command_reply. Broadcasts never include it. Omit it unless you have several in-flight commands.",
         "This is a long-lived WebSocket. Broadcasts arrive unsolicited.",
         (
-            "Broadcast shape: {\"broadcast\": \"jobs_changed\"|\"clusters_changed\"|\"servers_changed\"|\"cals_changed\", "
+            "Broadcast payload shape: {\"broadcast\": \"jobs_changed\"|\"clusters_changed\"|\"servers_changed\"|\"cals_changed\", "
             "\"updates\": [...], \"deletes\": [...]}. "
-            "There is no command_reply on broadcasts. Do not wait on command_reply "
+            "No command_reply on broadcasts. Do not wait on command_reply "
             "to learn that a job or cluster finished."
         ),
         "Disconnect is client-side only: send the bare word 'quit' (or 'exit'), "
@@ -127,10 +157,9 @@ AGENT_BOOTSTRAP = {
         "Clear-semantics: omit a field = leave unchanged; "
         "send null / \"\" / [] to clear.",
         (
-            "Start-and-wait pattern: send start_cluster, keep stdin open, "
-            "watch broadcast updates until the target cluster or its jobs "
-            "reach jobstate complete (or failed/killed). Then send quit. "
-            "Fall back to read_cluster / read_job if no broadcast arrives."
+            "Start-and-wait: send start_cluster, keep stdin open, wait for "
+            "clusters_changed updates[] on that cluster id with terminal jobstate. "
+            "Fall back to read_cluster if no broadcast arrives."
         ),
     ],
 }
