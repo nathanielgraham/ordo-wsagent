@@ -1,6 +1,6 @@
 [project]
 name = "ordo-wsagent"
-version = "0.2.0"
+version = "0.3.0"
 description = "Ordo WebSocket client library and stdin NDJSON CLI for agents"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -11,7 +11,7 @@ dependencies = [
 
 [project.optional-dependencies]
 async = ["websockets>=12.0"]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "websockets>=12.0"]
 
 [project.scripts]
 ordo-wsagent = "ordo_wsagent.cli:main"
