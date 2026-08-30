@@ -8,6 +8,7 @@ Installable library *and* a stdin NDJSON CLI.
 - live broadcasts when jobs/clusters change
 - a **watch registry** (many watches at once)
 - the **agent** decides when to disconnect
+- sync client for scripts/CLI; **async** client for ordo-bot
 
 MCP tools are request/response only. When you need to start work and know when it finished, use this client.
 
@@ -28,7 +29,9 @@ python3 -m ordo_wsagent --timeout 600
 # same as: python3 wsagent.py --timeout 600
 ```
 
-## Library
+## Library (sync)
+
+Scripts and the stdin CLI. Blocks the calling thread until the ack or watch fires.
 
 ```python
 from ordo_wsagent import OrdoClient
@@ -38,11 +41,30 @@ c.connect()
 c.start_cluster(18)
 done = c.wait_cluster(18, timeout=120)   # complete|failed|zombie|killed
 print(done["jobstate"], done["name"])
-# keep the socket for the next step...
-c.start_cluster(17)
-c.wait_cluster(17)
 c.close()   # you close when the workflow is finished
 ```
+
+## Library (async)
+
+For ordo-bot and any asyncio app. Same protocol and watches; does not block the event loop.
+
+```bash
+pip install 'ordo-wsagent[async]'
+```
+
+```python
+from ordo_wsagent import AsyncOrdoClient
+
+async def main():
+    c = AsyncOrdoClient.from_env()
+    await c.connect()
+    await c.start_cluster(18)
+    done = await c.wait_cluster(18, timeout=120)
+    print(done["jobstate"], done["name"])
+    await c.close()
+```
+
+`on_message` / `on_watch` may be sync or async callables.
 
 Several watches at once:
 
@@ -70,7 +92,7 @@ Keep the WebSocket open across a multi-step workflow.
 | How | When to use |
 |-----|-------------|
 | `quit` / `exit` (word or JSON) | Agent is finished |
-| `client.close()` | Library caller is finished |
+| `client.close()` / `await client.close()` | Library caller is finished |
 | `--timeout` | Safety net only |
 | `--watch-exit` | One-shot scripts: exit after **every** armed watch has fired |
 
@@ -118,7 +140,7 @@ Optional `request_id` on a command is copied onto that command’s reply only (n
 
 ## Sharing with ordo-bot
 
-`WatchRegistry`, `is_terminal`, and `OrdoClient` are the shared layer for [ordo-bot](https://github.com/nathanielgraham/ordo-bot). Bot-only pieces (LLM, frontend chat protocol) stay there.
+`WatchRegistry`, `is_terminal`, and `AsyncOrdoClient` are the shared layer for [ordo-bot](https://github.com/nathanielgraham/ordo-bot). Bot-only pieces (LLM, frontend chat protocol) stay there. Scripts keep using sync `OrdoClient`.
 
 ## Token
 
