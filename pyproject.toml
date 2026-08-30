@@ -1,0 +1,30 @@
+[project]
+name = "ordo-wsagent"
+version = "0.2.0"
+description = "Ordo WebSocket client library and stdin NDJSON CLI for agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "websocket-client>=1.6.0",
+]
+
+[project.optional-dependencies]
+async = ["websockets>=12.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+ordo-wsagent = "ordo_wsagent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/nathanielgraham/ordo-wsagent"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ordo_wsagent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
