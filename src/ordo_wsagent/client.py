@@ -1,6 +1,6 @@
 """Synchronous Ordo WebSocket client.
 
-Built for scripts and for ordo-bot to wrap. One connection, many watches.
+One connection, many watches. The caller decides when to close().
 """
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .protocol import DEFAULT_URL
 from .watches import Watch, WatchRegistry
@@ -20,6 +20,7 @@ except ImportError as exc:  # pragma: no cover
 
 
 MessageHandler = Callable[[Dict[str, Any]], None]
+Pending = Tuple[int, str, Any, threading.Event]
 
 
 class OrdoClient:
@@ -45,8 +46,9 @@ class OrdoClient:
         self._login_failed = threading.Event()
         self._closed = threading.Event()
         self._lock = threading.Lock()
-        self._pending: Dict[str, threading.Event] = {}
-        self._replies: Dict[str, Dict[str, Any]] = {}
+        self._pending: List[Pending] = []
+        self._replies: Dict[int, Dict[str, Any]] = {}
+        self._wait_seq = 0
         self._login_reply: Optional[Dict[str, Any]] = None
 
     @classmethod
@@ -72,9 +74,8 @@ class OrdoClient:
                 data = json.loads(message)
             except json.JSONDecodeError:
                 return
-            if not isinstance(data, dict):
-                return
-            self._dispatch(data)
+            if isinstance(data, dict):
+                self._dispatch(data)
 
         def on_close(ws: websocket.WebSocketApp, code, msg) -> None:
             self._closed.set()
@@ -122,24 +123,27 @@ class OrdoClient:
         name = str(command.get("command") or "")
         if not name:
             raise ValueError("command dict must contain 'command'")
+        rid = command.get("request_id")
+        token = None
+        ev = None
         if wait:
             ev = threading.Event()
             with self._lock:
-                self._pending[name] = ev
+                self._wait_seq += 1
+                token = self._wait_seq
+                self._pending.append((token, name, rid, ev))
         self._ws.send(json.dumps(command))
         if not wait:
             return None
         if not ev.wait(timeout=timeout):
             with self._lock:
-                self._pending.pop(name, None)
+                self._pending = [p for p in self._pending if p[0] != token]
             raise TimeoutError(f"Timed out waiting for {name}")
         with self._lock:
-            self._pending.pop(name, None)
-            return self._replies.pop(name, None)
+            return self._replies.pop(token, None)
 
     def command(self, name: str, **fields: Any) -> Dict[str, Any]:
-        reply = self.send_command({"command": name, **fields})
-        return reply or {}
+        return self.send_command({"command": name, **fields}) or {}
 
     def read_org(self) -> Dict[str, Any]:
         return self.command("read_org")
@@ -220,9 +224,24 @@ class OrdoClient:
             else:
                 self._login_failed.set()
         elif reply:
+            ev = None
+            token = None
             with self._lock:
-                ev = self._pending.get(str(reply))
-                self._replies[str(reply)] = data
+                rid = data.get("request_id")
+                idx = None
+                if rid is not None:
+                    for i, (_tok, name, want_rid, _w) in enumerate(self._pending):
+                        if name == str(reply) and want_rid == rid:
+                            idx = i
+                            break
+                if idx is None:
+                    for i, (_tok, name, want_rid, _w) in enumerate(self._pending):
+                        if name == str(reply) and want_rid is None:
+                            idx = i
+                            break
+                if idx is not None:
+                    token, _n, _r, ev = self._pending.pop(idx)
+                    self._replies[token] = data
             if ev:
                 ev.set()
 
