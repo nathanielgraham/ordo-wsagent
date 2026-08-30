@@ -12,8 +12,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .protocol import broadcast_kind, is_terminal, jobstate_of
 
-FILTER_TERMINAL = "_terminal"
-
 
 @dataclass
 class Watch:
@@ -142,7 +140,6 @@ class WatchRegistry:
         return fired
 
     def observe_payload(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Feed a raw server object (reply or broadcast)."""
         if not isinstance(data, dict):
             return []
         reply = data.get("command_reply")
