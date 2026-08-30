@@ -35,30 +35,44 @@ printf '{"command":"read_org"}\nquit\n' | ORDO_TOKEN=... python3 wsagent.py --ti
 
 (The JSON form also works: `printf '{"command":"read_org"}\n{"command":"quit"}\n' | ...`)
 
+To start work and wait for it to finish, **do not** close stdin after the start command. Keep the process running and read lines until a broadcast says the target is terminal, then send `quit`.
+
 ## 2. Output format (NDJSON)
 
-Every line is a JSON object:
+Every **stdout line** is a client wrapper:
+
+```json
+{"type":"message","ts":1788067850.1,"elapsed":0.2,"payload":{ }}
+```
 
 | `type`    | Meaning |
 |-----------|---------|
 | `info`    | Client events (`connected`, `agent_bootstrap`, `sending`, `timeout`, …) |
-| `message` | Everything from the Ordo server (command replies **and** broadcasts) |
+| `message` | Server JSON is in **`payload`** (command replies **and** broadcasts) |
 | `error`   | Client-side problems or login failure |
 | `summary` | Final line when the process exits |
 
-**Always look at `type == "message"`.** That is the data you care about.
+Look at `payload`, not the wrapper keys. Examples later in this README show **`payload` contents only**.
 
-Command replies have `command_reply`. Broadcasts do **not** — they have `broadcast` plus `updates` / `deletes`. Do not require `command_reply` to treat a message as useful.
+How to tell the two server shapes apart:
+
+| If `payload` has | It is | Completion? |
+|------------------|-------|-------------|
+| `command_reply` | Ack / result of a command you sent | No. `start_cluster` success means accepted, not finished. |
+| `broadcast` | Unsolicited live update | Maybe. Scan `payload.updates`. |
+
+A broadcast has **no** `command_reply`. Do not drop a line because `command_reply` is missing.
 
 ### Bootstrap messages
 
-After a successful login the client emits an `info` event with `event: "agent_bootstrap"`. It contains:
+After a successful login the client emits an `info` event with `event: "agent_bootstrap"` (`type` is `info`, recipe is in `payload`). It contains:
 
 - protocol reminder
 - first recommended call (`get_documentation`)
 - useful starter commands
 - doc section list
 - the core agent loop
+- a `wait_for_terminal` recipe for start-and-wait
 
 If login fails (or no token was supplied) the client emits a structured error with instructions on how to obtain a token and get started.
 
@@ -70,7 +84,7 @@ On connect the client automatically sends:
 {"command":"login_user","token":"..."}
 ```
 
-You will see a message with:
+You will see a `type=message` line whose `payload` contains:
 
 ```json
 "command_reply": "login_user",
@@ -83,10 +97,23 @@ Only after this succeeds does the client start reading your commands from stdin.
 
 This is the most important pattern.
 
-1. Send a start command.
-2. You immediately receive a `command_reply` saying the start was accepted.
-3. Later you receive one or more **broadcasts** when the real state changes.
-4. When a broadcast `updates` entry for the job or cluster you started reaches a terminal `jobstate` (`complete`, `failed`, `error`, `killed`, or `state_id` 5 = complete), you are done — disconnect.
+1. Send a start command. Keep stdin open.
+2. The next useful `payload` is a `command_reply` (`start_cluster` / `start_job`) with `success: 1`. That is an **ack**, not completion.
+3. Later `payload`s have `broadcast` set. Ignore `servers_changed` / `cals_changed` for this wait.
+4. You are done only when the **thing you started** is terminal, not when some other row in `updates` is terminal.
+
+Terminal `jobstate` values: `complete`, `failed`, `error`, `killed`. `state_id` 5 also means `complete`. Treat `failed` / `error` / `killed` as finished-unsuccessfully, not as “still running.”
+
+### What “done” means
+
+| You started | Done when |
+|-------------|-----------|
+| `start_job` id N | A `broadcast: "jobs_changed"` `updates[]` row with `id` == N is terminal |
+| `start_cluster` id C | A `broadcast: "clusters_changed"` `updates[]` row with `id` == C is terminal |
+
+One child job going `complete` is **not** the cluster finishing. `prep` completing does not mean `Bork da Cake` completed. Wait for the **cluster** row (or every member job you care about).
+
+`reset_cluster` also emits broadcasts. Those are not the new run. After `start_*`, ignore updates whose `started` is missing or less than the `started_at` from the start reply.
 
 ### Example – start a cluster and watch
 
@@ -94,7 +121,7 @@ This is the most important pattern.
 {"command":"start_cluster","id":17}
 ```
 
-Immediate reply (example):
+Immediate `payload` (ack only):
 
 ```json
 {
@@ -105,7 +132,7 @@ Immediate reply (example):
 }
 ```
 
-Later you will see broadcasts that look like:
+Later `payload` (a job in that cluster moved; cluster may still be running):
 
 ```json
 {
@@ -117,12 +144,15 @@ Later you will see broadcasts that look like:
       "cluster_id": 17,
       "jobstate": "complete",
       "state_id": 5,
+      "started": 1788067851,
       "exit_code": 0
     }
   ],
   "deletes": []
 }
 ```
+
+Later `payload` (the cluster itself is done — this is what you wait for):
 
 ```json
 {
@@ -132,7 +162,8 @@ Later you will see broadcasts that look like:
       "id": 17,
       "name": "deploy-saas",
       "jobstate": "complete",
-      "state_id": 5
+      "state_id": 5,
+      "started": 1788067850
     }
   ],
   "deletes": []
@@ -141,11 +172,15 @@ Later you will see broadcasts that look like:
 
 **Agent logic:**
 
-- Keep reading the NDJSON stream. Keep stdin open.
-- For each `type == "message"` payload, if `broadcast` is `jobs_changed` or `clusters_changed`, scan `updates`.
-- When the job/cluster you care about (match `id`, and prefer `started` >= the `started_at` from `start_*` so a prior run is not mistaken for this one) has terminal `jobstate`, treat the work as finished.
-- Then disconnect (or issue a `read_log` first if you need logs).
-- If no matching broadcast arrives within a short window, `read_cluster` / `read_job` once as a fallback. Do not wait only on `command_reply`.
+- Read stdout line by line. Parse JSON. If `type != "message"`, ignore for this wait (except `error` / `timeout` / `closed`).
+- Use `payload = line["payload"]`.
+- If `payload.command_reply` is the start ack, store `started_at` and keep waiting.
+- If `payload.broadcast` is `clusters_changed` (cluster start) or `jobs_changed` (job start), scan `payload.updates`.
+- Match `updates[].id` to the id you started. For a cluster run, prefer the `clusters_changed` row.
+- Optional extra guard: `updates[].started >= started_at` from the ack.
+- Then you may `read_log` and send `quit`.
+- If nothing matching arrives after ~20s, send `read_cluster` / `read_job` once and use that `jobstate`. Do not wait on `command_reply` for completion.
+- `request_id` is not part of this wait. Broadcasts never echo it.
 
 ### How to disconnect
 
@@ -179,7 +214,7 @@ Any of these work:
 
 ## 6. Broadcasts you will see
 
-These arrive unsolicited whenever something changes. They are `type: "message"` payloads with **no** `command_reply`.
+These arrive unsolicited whenever something changes. On stdout they are `type: "message"` lines. The server object is `payload`. `payload` has **no** `command_reply`.
 
 ```json
 {
@@ -189,29 +224,31 @@ These arrive unsolicited whenever something changes. They are `type: "message"` 
 }
 ```
 
-| `broadcast` | Meaning |
-|-------------|---------|
+| `payload.broadcast` | Meaning |
+|---------------------|---------|
 | `jobs_changed` | Job created, updated, started, finished, or deleted. `updates` fields match `read_job`. |
 | `clusters_changed` | Cluster state or membership changed. `updates` fields match `read_cluster`. |
-| `servers_changed` | Server metrics or status. |
-| `cals_changed` | Calendar created, updated, or deleted. |
+| `servers_changed` | Server metrics or status. Not a completion signal for jobs. |
+| `cals_changed` | Calendar created, updated, or deleted. Not a completion signal for jobs. |
 
-Recognize a broadcast by the `broadcast` key (and `updates` / `deletes`). Do **not** look for `command_reply` or a top-level `jobs` / `clusters` array — those keys are not present on broadcasts.
+Recognize a broadcast by `payload.broadcast` (and `updates` / `deletes`). Do **not** look for `command_reply` or a top-level `jobs` / `clusters` array — those keys are not present on broadcasts.
+
+`deletes` means the id is gone, not that it completed.
 
 ## 7. Recommended agent workflow
 
-Optional `request_id` on a command is echoed on that `command_reply` only (never on broadcasts). Omit it for today's protocol.
+`request_id` is optional. If you send it on a command, it is copied onto **that command's** `command_reply` only. It is never present on broadcasts and cannot tell you a job finished. You can omit it.
 
 1. Start `python3 wsagent.py` with a generous timeout (120–600 s) as a safety net
 2. Wait for `login_user` success + the `agent_bootstrap` info event
 3. Call `get_documentation` (overview / quickstart, format markdown) if this is a new session
 4. Send `find_cluster` / `read_cluster` to understand current state
-5. Send `start_cluster` or `start_job` and note `started_at` from the reply
-6. Keep reading the stream. Completion is a `broadcast` whose `updates` contain the target id in a terminal `jobstate`
+5. Send `start_cluster` or `start_job`. Store `payload.started_at` from the ack. Keep stdin open.
+6. Read `type=message` lines. Completion is `payload.broadcast` whose `updates` contain the **started id** in a terminal `jobstate`. For a cluster, wait for `clusters_changed` on that cluster id.
 7. (optional) send `read_log`
 8. Disconnect with `quit` (bare word or `{"command":"quit"}`) or by closing stdin
 
-**Note:** Keep stdin open until you are finished. Closing stdin immediately triggers shutdown (correct for one-shots, sharp for long-lived runners).
+**Note:** Keep stdin open until you are finished. Closing stdin immediately triggers shutdown (correct for one-shots, wrong for start-and-wait).
 
 ## 8. Clear-semantics reminder (important)
 
