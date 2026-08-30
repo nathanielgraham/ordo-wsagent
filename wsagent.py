@@ -10,6 +10,10 @@ wsagent.py – minimal Ordo WebSocket client for agents
     Read NDJSON on stdout.  Only lines with type=message contain
     server data (command replies + live broadcasts).
 
+    Command replies have command_reply. Broadcasts have broadcast
+    plus updates/deletes — they do not have command_reply.
+    Wait for terminal jobstate on broadcast updates, not on command_reply.
+
     When finished, send quit (bare word or {"command":"quit"}),
     close stdin, or kill the process.  --timeout is only a safety net.
 """
@@ -42,8 +46,9 @@ AGENT_BOOTSTRAP = {
     "protocol": (
         "Send one JSON object per line on stdin. "
         "Read NDJSON on stdout. "
-        "Only lines with type=message contain server data "
-        "(command replies and live broadcasts)."
+        "Only lines with type=message contain server data. "
+        "Command replies have command_reply. "
+        "Broadcasts have broadcast plus updates/deletes and do not have command_reply."
     ),
     "first_step": (
         "Call get_documentation (section 'overview' or 'quickstart', "
@@ -90,14 +95,23 @@ AGENT_BOOTSTRAP = {
     ],
     "agent_loop": (
         "1. send a command (optional request_id is echoed on that command_reply; omit for today's protocol)  "
-        "2. wait for the matching command_reply "
-        "(and any jobs_changed / clusters_changed broadcasts)  "
-        "3. when you have what you need, disconnect with quit "
+        "2. wait for the matching command_reply if you sent a command  "
+        "3. for start-and-wait, keep reading type=message payloads whose "
+        "broadcast is jobs_changed or clusters_changed and scan updates[]  "
+        "until the target id reaches a terminal jobstate "
+        "(complete, failed, error, killed, or state_id 5)  "
+        "4. then disconnect with quit "
         "(bare word or {\"command\":\"quit\"}) or by closing stdin / killing the process"
     ),
     "notes": [
         "Optional request_id on a command is copied onto that command_reply only. Broadcasts never include it. Omit the field and the reply is unchanged.",
         "This is a long-lived WebSocket. Broadcasts arrive unsolicited.",
+        (
+            "Broadcast shape: {\"broadcast\": \"jobs_changed\"|\"clusters_changed\"|\"servers_changed\"|\"cals_changed\", "
+            "\"updates\": [...], \"deletes\": [...]}. "
+            "There is no command_reply on broadcasts. Do not wait on command_reply "
+            "to learn that a job or cluster finished."
+        ),
         "Disconnect is client-side only: send the bare word 'quit' (or 'exit'), "
         "or the JSON object {\"command\":\"quit\"}. Neither is forwarded to the server.",
         "Keep stdin open until you are finished; closing stdin also triggers shutdown.",
@@ -114,9 +128,9 @@ AGENT_BOOTSTRAP = {
         "send null / \"\" / [] to clear.",
         (
             "Start-and-wait pattern: send start_cluster, keep stdin open, "
-            "watch for clusters_changed / jobs_changed broadcasts until the "
-            "target cluster reaches jobstate complete (or failed/killed). "
-            "Then send quit."
+            "watch broadcast updates until the target cluster or its jobs "
+            "reach jobstate complete (or failed/killed). Then send quit. "
+            "Fall back to read_cluster / read_job if no broadcast arrives."
         ),
     ],
 }
@@ -231,6 +245,8 @@ def main() -> None:
             emit("raw", {"text": message}, start)
             return
 
+        # Forward the server payload unchanged. Command replies have
+        # command_reply; broadcasts have broadcast + updates/deletes.
         emit("message", data, start)
 
         reply = data.get("command_reply")

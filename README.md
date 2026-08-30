@@ -48,6 +48,8 @@ Every line is a JSON object:
 
 **Always look at `type == "message"`.** That is the data you care about.
 
+Command replies have `command_reply`. Broadcasts do **not** — they have `broadcast` plus `updates` / `deletes`. Do not require `command_reply` to treat a message as useful.
+
 ### Bootstrap messages
 
 After a successful login the client emits an `info` event with `event: "agent_bootstrap"`. It contains:
@@ -83,8 +85,8 @@ This is the most important pattern.
 
 1. Send a start command.
 2. You immediately receive a `command_reply` saying the start was accepted.
-3. Later you receive one or more **broadcasts** (`jobs_changed` / `clusters_changed`) when the real state changes.
-4. When you see the job or cluster reach a terminal state (`complete`, `failed`, etc.), you are done — disconnect.
+3. Later you receive one or more **broadcasts** when the real state changes.
+4. When a broadcast `updates` entry for the job or cluster you started reaches a terminal `jobstate` (`complete`, `failed`, `error`, `killed`, or `state_id` 5 = complete), you are done — disconnect.
 
 ### Example – start a cluster and watch
 
@@ -98,32 +100,52 @@ Immediate reply (example):
 {
   "command_reply": "start_cluster",
   "success": 1,
-  "message": "cluster started"
+  "cluster_id": 17,
+  "started_at": 1788067850
 }
 ```
 
-Later you will see broadcasts that look roughly like:
+Later you will see broadcasts that look like:
 
 ```json
 {
-  "command_reply": "jobs_changed",
-  "jobs": [
+  "broadcast": "jobs_changed",
+  "updates": [
     {
       "id": 10,
       "name": "verify",
+      "cluster_id": 17,
       "jobstate": "complete",
       "state_id": 5,
       "exit_code": 0
     }
-  ]
+  ],
+  "deletes": []
+}
+```
+
+```json
+{
+  "broadcast": "clusters_changed",
+  "updates": [
+    {
+      "id": 17,
+      "name": "deploy-saas",
+      "jobstate": "complete",
+      "state_id": 5
+    }
+  ],
+  "deletes": []
 }
 ```
 
 **Agent logic:**
 
-- Keep reading the NDJSON stream.
-- When you see a broadcast where the job/cluster you care about has `jobstate` / state in `["complete","failed","error"]` (or `state_id` 5 = complete, etc.), treat the work as finished.
+- Keep reading the NDJSON stream. Keep stdin open.
+- For each `type == "message"` payload, if `broadcast` is `jobs_changed` or `clusters_changed`, scan `updates`.
+- When the job/cluster you care about (match `id`, and prefer `started` >= the `started_at` from `start_*` so a prior run is not mistaken for this one) has terminal `jobstate`, treat the work as finished.
 - Then disconnect (or issue a `read_log` first if you need logs).
+- If no matching broadcast arrives within a short window, `read_cluster` / `read_job` once as a fallback. Do not wait only on `command_reply`.
 
 ### How to disconnect
 
@@ -157,13 +179,24 @@ Any of these work:
 
 ## 6. Broadcasts you will see
 
-These arrive unsolicited whenever something changes:
+These arrive unsolicited whenever something changes. They are `type: "message"` payloads with **no** `command_reply`.
 
-- `jobs_changed` – one or more jobs updated (state, exit code, etc.)
-- `clusters_changed` – cluster state or membership changed
-- `servers_changed` – server metrics or status
+```json
+{
+  "broadcast": "jobs_changed",
+  "updates": [ … ],
+  "deletes": [ {"id": 18} ]
+}
+```
 
-A broadcast is just another `type: "message"` object. Look at the `command_reply` field (or the presence of a `jobs` / `clusters` array) to recognise them.
+| `broadcast` | Meaning |
+|-------------|---------|
+| `jobs_changed` | Job created, updated, started, finished, or deleted. `updates` fields match `read_job`. |
+| `clusters_changed` | Cluster state or membership changed. `updates` fields match `read_cluster`. |
+| `servers_changed` | Server metrics or status. |
+| `cals_changed` | Calendar created, updated, or deleted. |
+
+Recognize a broadcast by the `broadcast` key (and `updates` / `deletes`). Do **not** look for `command_reply` or a top-level `jobs` / `clusters` array — those keys are not present on broadcasts.
 
 ## 7. Recommended agent workflow
 
@@ -173,8 +206,8 @@ Optional `request_id` on a command is echoed on that `command_reply` only (never
 2. Wait for `login_user` success + the `agent_bootstrap` info event
 3. Call `get_documentation` (overview / quickstart, format markdown) if this is a new session
 4. Send `find_cluster` / `read_cluster` to understand current state
-5. Send `start_cluster` or `start_job`
-6. Keep reading the stream until you see the relevant completion broadcast
+5. Send `start_cluster` or `start_job` and note `started_at` from the reply
+6. Keep reading the stream. Completion is a `broadcast` whose `updates` contain the target id in a terminal `jobstate`
 7. (optional) send `read_log`
 8. Disconnect with `quit` (bare word or `{"command":"quit"}`) or by closing stdin
 
