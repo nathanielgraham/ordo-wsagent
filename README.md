@@ -35,7 +35,22 @@ printf '{"command":"read_org"}\nquit\n' | ORDO_TOKEN=... python3 wsagent.py --ti
 
 (The JSON form also works: `printf '{"command":"read_org"}\n{"command":"quit"}\n' | ...`)
 
-To start work and wait for it to finish, **do not** close stdin after the start command. Keep the process running and read lines until a broadcast says the target is terminal, then send `quit`.
+### Start a cluster and wait (recommended)
+
+`watch_cluster` / `watch_job` are **client-only**. They are not sent to the server. The client takes one snapshot so an already-terminal target does not hang, then waits on broadcasts.
+
+```bash
+printf '{"command":"start_cluster","id":18}\n{"command":"watch_cluster","id":18}\n' \
+  | ORDO_TOKEN=... python3 wsagent.py --timeout 120 --watch-exit
+```
+
+Or arm the watch from the CLI (stdin may close; the watch still runs):
+
+```bash
+python3 wsagent.py --watch-cluster 18 --watch-exit --timeout 120
+```
+
+Wait for a `type=info` line with `payload.event=watch_done`. That is the completion signal. Do not treat the `start_*` ack as done.
 
 ## 2. Output format (NDJSON)
 
@@ -47,7 +62,7 @@ Every **stdout line** is a client wrapper:
 
 | `type`    | Meaning |
 |-----------|---------|
-| `info`    | Client events (`connected`, `agent_bootstrap`, `sending`, `timeout`, …) |
+| `info`    | Client events (`connected`, `agent_bootstrap`, `watch_armed`, `watch_done`, `sending`, `timeout`, …) |
 | `message` | Server JSON is in **`payload`** (command replies **and** broadcasts) |
 | `error`   | Client-side problems or login failure |
 | `summary` | Final line when the process exits |
@@ -69,10 +84,10 @@ After a successful login the client emits an `info` event with `event: "agent_bo
 
 - protocol reminder
 - first recommended call (`get_documentation`)
-- useful starter commands
+- useful starter commands (including `watch_cluster`)
 - doc section list
 - the core agent loop
-- a `wait_for_terminal` recipe for start-and-wait
+- a `wait_for_terminal` recipe
 
 If login fails (or no token was supplied) the client emits a structured error with instructions on how to obtain a token and get started.
 
@@ -97,28 +112,31 @@ Only after this succeeds does the client start reading your commands from stdin.
 
 This is the most important pattern.
 
-1. Send a start command. Keep stdin open.
-2. The next useful `payload` is a `command_reply` (`start_cluster` / `start_job`) with `success: 1`. That is an **ack**, not completion.
-3. Later `payload`s have `broadcast` set. Ignore `servers_changed` / `cals_changed` for this wait.
-4. You are done only when the **thing you started** is terminal, not when some other row in `updates` is terminal.
+1. Send `start_cluster` or `start_job`. Keep stdin open **or** use `--watch-cluster` / `--watch-job`.
+2. The `command_reply` with `success: 1` is an **ack**, not completion.
+3. Send `{"command":"watch_cluster","id":C}` or `{"command":"watch_job","id":N}` (client-only).
+4. Wait for `type=info` / `event=watch_done`, **or** scan broadcasts yourself.
 
-Terminal `jobstate` values: `complete`, `failed`, `error`, `killed`. `state_id` 5 also means `complete`. Treat `failed` / `error` / `killed` as finished-unsuccessfully, not as “still running.”
+Starting a **completed** cluster or job is allowed. The server refuses start only when the target is already `running` or `starting`.
+
+Terminal `jobstate` values: `complete`, `failed`, `zombie`. `state_id` 5 also means `complete`. Any of those ends a watch.
+
+`exit_code` is **null** while the job is not terminal (`ready`, `waiting`, `starting`, `running`). Null is not a failure. Read `exit_code` only after the job is terminal (or use `read_log`).
 
 ### What “done” means
 
-| You started | Done when |
-|-------------|-----------|
-| `start_job` id N | A `broadcast: "jobs_changed"` `updates[]` row with `id` == N is terminal |
-| `start_cluster` id C | A `broadcast: "clusters_changed"` `updates[]` row with `id` == C is terminal |
+| You started / watched | Done when |
+|-----------------------|-----------|
+| `start_job` / `watch_job` id N | `broadcast: "jobs_changed"` `updates[]` row with `id` == N is terminal |
+| `start_cluster` / `watch_cluster` id C | `broadcast: "clusters_changed"` `updates[]` row with `id` == C is terminal |
 
-One child job going `complete` is **not** the cluster finishing. `prep` completing does not mean `Bork da Cake` completed. Wait for the **cluster** row (or every member job you care about).
-
-`reset_cluster` also emits broadcasts. Those are not the new run. After `start_*`, ignore updates whose `started` is missing or less than the `started_at` from the start reply.
+One child job going `complete` is **not** the cluster finishing. `prep` completing does not mean `Bork da Cake` completed. `watch_cluster` waits for the **cluster** row.
 
 ### Example – start a cluster and watch
 
 ```json
-{"command":"start_cluster","id":17}
+{"command":"start_cluster","id":18}
+{"command":"watch_cluster","id":18}
 ```
 
 Immediate `payload` (ack only):
@@ -127,10 +145,12 @@ Immediate `payload` (ack only):
 {
   "command_reply": "start_cluster",
   "success": 1,
-  "cluster_id": 17,
+  "cluster_id": 18,
   "started_at": 1788067850
 }
 ```
+
+Client then emits `watch_armed`, sends one `read_cluster` snapshot, and listens.
 
 Later `payload` (a job in that cluster moved; cluster may still be running):
 
@@ -139,9 +159,9 @@ Later `payload` (a job in that cluster moved; cluster may still be running):
   "broadcast": "jobs_changed",
   "updates": [
     {
-      "id": 10,
-      "name": "verify",
-      "cluster_id": 17,
+      "id": 11,
+      "name": "prep",
+      "cluster_id": 18,
       "jobstate": "complete",
       "state_id": 5,
       "started": 1788067851,
@@ -152,15 +172,15 @@ Later `payload` (a job in that cluster moved; cluster may still be running):
 }
 ```
 
-Later `payload` (the cluster itself is done — this is what you wait for):
+That does **not** finish `watch_cluster`. This does:
 
 ```json
 {
   "broadcast": "clusters_changed",
   "updates": [
     {
-      "id": 17,
-      "name": "deploy-saas",
+      "id": 18,
+      "name": "Bork da Cake",
       "jobstate": "complete",
       "state_id": 5,
       "started": 1788067850
@@ -170,17 +190,22 @@ Later `payload` (the cluster itself is done — this is what you wait for):
 }
 ```
 
-**Agent logic:**
+Then a client `info` event:
 
-- Read stdout line by line. Parse JSON. If `type != "message"`, ignore for this wait (except `error` / `timeout` / `closed`).
-- Use `payload = line["payload"]`.
-- If `payload.command_reply` is the start ack, store `started_at` and keep waiting.
-- If `payload.broadcast` is `clusters_changed` (cluster start) or `jobs_changed` (job start), scan `payload.updates`.
-- Match `updates[].id` to the id you started. For a cluster run, prefer the `clusters_changed` row.
-- Optional extra guard: `updates[].started >= started_at` from the ack.
-- Then you may `read_log` and send `quit`.
-- If nothing matching arrives after ~20s, send `read_cluster` / `read_job` once and use that `jobstate`. Do not wait on `command_reply` for completion.
-- `request_id` is not part of this wait. Broadcasts never echo it.
+```json
+{
+  "event": "watch_done",
+  "kind": "cluster",
+  "id": 18,
+  "jobstate": "complete",
+  "state_id": 5,
+  "source": "broadcast"
+}
+```
+
+`--watch-exit` shuts the process down at that point. Without it, send `quit` when you are finished (`read_log` is still available).
+
+If stdin hits EOF while a watch is active, the client **keeps running** until `watch_done` or `--timeout`.
 
 ### How to disconnect
 
@@ -190,7 +215,8 @@ Any of these work:
 
 - bare word: `quit` or `exit`
 - JSON: `{"command":"quit"}` or `{"command":"exit"}`
-- close stdin (EOF)
+- close stdin (EOF) — after the watch has finished, or when no watch is armed
+- `--watch-exit` after `watch_done`
 - kill the process
 
 `quit` is the clean in-band way for long-lived agent sessions.
@@ -207,10 +233,13 @@ Any of these work:
 | Read latest log | `{"command":"read_log","id":10}` |
 | Start a cluster | `{"command":"start_cluster","id":17}` |
 | Start a job | `{"command":"start_job","id":42}` |
+| Watch until terminal (client-only) | `{"command":"watch_cluster","id":17}` or `watch_job` |
 | Stop / kill | `{"command":"kill_cluster","id":17}` or `kill_job` |
 | Reset | `{"command":"reset_cluster","id":24}` |
 
 (There are also `create_*`, `update_*`, `delete_*` commands. Prefer the clear-semantics rules: omit a field = leave unchanged; send `null` or `[]` / `""` to clear.)
+
+Client-only (never forwarded): `quit`, `exit`, `watch_cluster`, `watch_job`.
 
 ## 6. Broadcasts you will see
 
@@ -243,12 +272,13 @@ Recognize a broadcast by `payload.broadcast` (and `updates` / `deletes`). Do **n
 2. Wait for `login_user` success + the `agent_bootstrap` info event
 3. Call `get_documentation` (overview / quickstart, format markdown) if this is a new session
 4. Send `find_cluster` / `read_cluster` to understand current state
-5. Send `start_cluster` or `start_job`. Store `payload.started_at` from the ack. Keep stdin open.
-6. Read `type=message` lines. Completion is `payload.broadcast` whose `updates` contain the **started id** in a terminal `jobstate`. For a cluster, wait for `clusters_changed` on that cluster id.
-7. (optional) send `read_log`
-8. Disconnect with `quit` (bare word or `{"command":"quit"}`) or by closing stdin
+5. Send `start_cluster` or `start_job` unless the target is already `running`/`starting`
+6. Send `watch_cluster` / `watch_job` (or pass `--watch-cluster` / `--watch-job`)
+7. Wait for `event=watch_done` (or the matching `clusters_changed` / `jobs_changed` broadcast)
+8. (optional) send `read_log`
+9. Disconnect with `quit` or `--watch-exit`
 
-**Note:** Keep stdin open until you are finished. Closing stdin immediately triggers shutdown (correct for one-shots, wrong for start-and-wait).
+**Note:** Keep stdin open until you are finished unless a watch is armed. A watch survives stdin EOF.
 
 ## 8. Clear-semantics reminder (important)
 
