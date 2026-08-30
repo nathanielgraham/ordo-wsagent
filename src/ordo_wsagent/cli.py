@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""NDJSON stdin CLI over OrdoClient."""
+"""NDJSON stdin CLI over OrdoClient.
+
+The process stays connected until the agent sends quit/exit, the safety
+--timeout fires, or --watch-exit and every armed watch has completed.
+watch_done never closes the socket by itself.
+"""
 
 from __future__ import annotations
 
@@ -55,7 +60,10 @@ AGENT_BOOTSTRAP = {
         "watch_cluster / watch_job are client-side; they are not forwarded.",
         "start_* success is an ack. Wait for watch_done or a terminal jobstate.",
         "Terminal jobstate names: complete, failed, zombie, killed.",
-        "Disconnect with quit.",
+        "Keep the socket open across steps. Disconnect with quit when you are finished.",
+        "A dropped connection is not a job failure; reconnect and read_*.",
+        "exit_code is only meaningful after jobstate is terminal.",
+        "Clear-semantics: omit a field to leave it; send null / \"\" / [] to clear.",
     ],
 }
 
@@ -82,12 +90,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--timeout", type=int, default=int(os.environ.get("ORDO_TIMEOUT", "600")))
     p.add_argument("--watch-cluster", type=int, default=None, metavar="ID")
     p.add_argument("--watch-job", type=int, default=None, metavar="ID")
-    p.add_argument("--watch-exit", action="store_true")
+    p.add_argument(
+        "--watch-exit",
+        action="store_true",
+        help="After every armed watch fires, exit. Default is stay connected until quit.",
+    )
     args = p.parse_args(argv)
-
-    if args.watch_cluster is not None and args.watch_job is not None:
-        print("Use only one of --watch-cluster / --watch-job", file=sys.stderr)
-        sys.exit(2)
 
     start = time.time()
     if not args.token:
@@ -96,7 +104,6 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     done = threading.Event()
-    eof_seen = threading.Event()
     client = OrdoClient(token=args.token, url=args.url)
 
     def on_message(data: dict) -> None:
@@ -104,9 +111,10 @@ def main(argv: list[str] | None = None) -> None:
 
     def on_watch(event: dict) -> None:
         slim = {k: v for k, v in event.items() if k != "object"}
+        slim["watches_remaining"] = len(client.watches)
         emit("info", slim, start)
-        if args.watch_exit or eof_seen.is_set():
-            _shutdown("watch_done")
+        if args.watch_exit and len(client.watches) == 0:
+            _shutdown("watch_exit")
 
     client.on_message = on_message
     client.on_watch = on_watch
@@ -125,7 +133,7 @@ def main(argv: list[str] | None = None) -> None:
                 "id": int(oid),
                 "reason": reason,
                 "terminal_jobstate": sorted(TERMINAL_JOBSTATES),
-                "note": "Client-side watch via registry. Snapshot then broadcasts. jobstate names only.",
+                "note": "Client-side watch. Socket stays open after watch_done unless you send quit or pass --watch-exit.",
             },
             start,
         )
@@ -142,7 +150,7 @@ def main(argv: list[str] | None = None) -> None:
     emit("info", AGENT_BOOTSTRAP, start)
     if args.watch_cluster is not None:
         _arm("cluster", args.watch_cluster, "cli")
-    elif args.watch_job is not None:
+    if args.watch_job is not None:
         _arm("job", args.watch_job, "cli")
 
     def stdin_reader() -> None:
@@ -181,19 +189,15 @@ def main(argv: list[str] | None = None) -> None:
                     emit("error", {"message": str(e)}, start)
         except Exception as e:
             emit("error", {"message": f"stdin error: {e}"}, start)
-        eof_seen.set()
-        if len(client.watches):
-            emit(
-                "info",
-                {
-                    "event": "stdin_eof_watch_active",
-                    "note": "Stdin closed; watches still running until terminal jobstate or timeout.",
-                    "watches": len(client.watches),
-                },
-                start,
-            )
-            return
-        _shutdown("eof")
+        emit(
+            "info",
+            {
+                "event": "stdin_eof",
+                "note": "Stdin closed; socket stays open until quit, --watch-exit (all watches done), or --timeout.",
+                "watches": len(client.watches),
+            },
+            start,
+        )
 
     threading.Thread(target=stdin_reader, daemon=True).start()
     finished = done.wait(timeout=args.timeout)
