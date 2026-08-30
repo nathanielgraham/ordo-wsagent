@@ -16,7 +16,6 @@ from .watches import Watch, WatchRegistry
 
 try:
     import websockets
-    from websockets.client import WebSocketClientProtocol
 except ImportError as exc:  # pragma: no cover
     raise ImportError("pip install 'ordo-wsagent[async]'") from exc
 
@@ -42,7 +41,7 @@ class AsyncOrdoClient:
         self.on_message: Optional[MessageHandler] = None
         self.on_watch: Optional[MessageHandler] = None
 
-        self._ws: Optional[WebSocketClientProtocol] = None
+        self._ws: Any = None
         self._reader: Optional[asyncio.Task] = None
         self._logged_in = asyncio.Event()
         self._login_failed = asyncio.Event()
